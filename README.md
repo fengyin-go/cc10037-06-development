@@ -77,5 +77,35 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 回填续跑（写入回执与依赖阻塞）
+
+值班人员需要知道一次中断的回填该从哪天续跑、哪些天被上游拖累。回填追踪模块在
+通用进度（完成比例、错误计数）之外，新增按分区写入回执能力：
+
+- 引擎：`backend/app/engine/write_receipt.py`
+  - `PartitionReceipt` 按分区记录回执，关联每次 `WriteAttempt` 的写入位置、
+    产出版本和 `PartitionBlocker` 依赖阻塞明细；
+  - 续跑视图把分区分为四类：独立失败日（可立即恢复）、更正续跑组（上游更正已
+    确认，按更正版本重取数）、依赖等待组（读取前一日累计结果且上游更正未走完）、
+    已稳定（成功且无更正影响，不算待恢复）；
+  - 回刷补偿据阻塞明细切出「可提交」与「依赖阻塞」批次；执行时从回执关联的
+    最近写入位置重新取数，阻塞批次拒绝提交；
+  - 成功的尝试不会被重复恢复，只有其读取的上游版本确实被更正取代
+    （含沿前一日累计链路的传递影响）时才重新进入待恢复集合。
+- 路由：`backend/app/routers/backfill_resume.py`，前缀 `/api/backfill-resume`
+  （`trackers`、`/{id}/view`、`/{id}/receipts`、`/batches/cut`、
+  `/batches/{n}/submit`、`/{id}/downstream-readable`）。
+- 前端：侧边栏「回填续跑」进入 `BackfillResumeView.vue`，可查看阻塞明细、
+  切批、提交回刷并核对批次覆盖日期与下游实际能读取的分区。
+- 内置三分区演示场景 `BK-20261120-001`：11-15 写入直接失败、11-16 已确认但
+  上游收到更正、11-17 读取 11-16 累计结果而被依赖阻塞。
+
+验证脚本（在 `backend/` 下执行）：
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/verify_resume.py       # 领域逻辑全流程断言
+PYTHONPATH=. .venv/bin/python scripts/verify_resume_api.py   # HTTP 路由冒烟（含 409）
+```
+
 领域：数据工程
 子方向：数仓与数据湖
